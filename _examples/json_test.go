@@ -29,7 +29,7 @@ import (
 	"net/http"
 	"testing"
 
-	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
+	"github.com/goware/go-vcr/recorder"
 )
 
 // payload is a stripped down version of the payload as received from

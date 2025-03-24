@@ -5,11 +5,6 @@ Fork of https://github.com/dnaeon/go-vcr
 
 ---
 
-[![Build Status](https://github.com/dnaeon/go-vcr/actions/workflows/test.yaml/badge.svg)](https://github.com/dnaeon/go-vcr/actions/workflows/test.yaml/badge.svg)
-[![Go Reference](https://pkg.go.dev/badge/gopkg.in/dnaeon/go-vcr.v4.svg)](https://pkg.go.dev/gopkg.in/dnaeon/go-vcr.v4)
-[![Go Report Card](https://goreportcard.com/badge/gopkg.in/dnaeon/go-vcr.v4)](https://goreportcard.com/report/gopkg.in/dnaeon/go-vcr.v4)
-[![codecov](https://codecov.io/gh/dnaeon/go-vcr/branch/v4/graph/badge.svg)](https://codecov.io/gh/dnaeon/go-vcr)
-
 `go-vcr` simplifies testing by recording your HTTP interactions and replaying
 them in future runs in order to provide fast, deterministic and accurate testing
 of your code.
@@ -21,7 +16,7 @@ of your code.
 Install `go-vcr` by executing the command below:
 
 ```bash
-$ go get -v gopkg.in/dnaeon/go-vcr.v4
+$ go get github.com/goware/go-vcr
 ```
 
 Note, that if you are migrating from a previous version of `go-vcr`, you may
@@ -39,7 +34,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
+	"github.com/goware/go-vcr/recorder"
 )
 
 func TestHelloWorld(t *testing.T) {
