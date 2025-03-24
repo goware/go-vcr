@@ -216,7 +216,6 @@ func WithIgnoreUserAgent() DefaultMatcherOption {
 	opt := func(m *defaultMatcher) {
 		m.ignoreHeaders = append(m.ignoreHeaders, "User-Agent")
 	}
-
 	return opt
 }
 
@@ -226,7 +225,6 @@ func WithIgnoreAuthorization() DefaultMatcherOption {
 	opt := func(m *defaultMatcher) {
 		m.ignoreHeaders = append(m.ignoreHeaders, "Authorization")
 	}
-
 	return opt
 }
 
@@ -236,7 +234,6 @@ func WithIgnoreHeaders(val ...string) DefaultMatcherOption {
 	opt := func(m *defaultMatcher) {
 		m.ignoreHeaders = append(m.ignoreHeaders, val...)
 	}
-
 	return opt
 }
 
@@ -246,7 +243,6 @@ func NewDefaultMatcher(opts ...DefaultMatcherOption) MatcherFunc {
 	for _, opt := range opts {
 		opt(m)
 	}
-
 	return m.matcher
 }
 
@@ -287,7 +283,6 @@ func (m *defaultMatcher) bodyMatches(r *http.Request, i Request) bool {
 			return false
 		}
 	}
-
 	return true
 }
 

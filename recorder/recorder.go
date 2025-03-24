@@ -136,7 +136,6 @@ func NewHook(handler HookFunc, kind HookKind) *Hook {
 		Handler: handler,
 		Kind:    kind,
 	}
-
 	return hook
 }
 
@@ -154,6 +153,7 @@ type blockUnsafeMethodsRoundTripper struct {
 	RoundTripper http.RoundTripper
 }
 
+// TODO: rename this method, "unsafe" is a strange name / term..
 func (r *blockUnsafeMethodsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	safeMethods := map[string]bool{
 		http.MethodGet:     true,
@@ -218,7 +218,6 @@ func WithMode(mode Mode) Option {
 	opt := func(r *Recorder) {
 		r.mode = mode
 	}
-
 	return opt
 }
 
@@ -228,7 +227,6 @@ func WithRealTransport(rt http.RoundTripper) Option {
 	opt := func(r *Recorder) {
 		r.realTransport = rt
 	}
-
 	return opt
 }
 
@@ -239,7 +237,6 @@ func WithBlockUnsafeMethods(val bool) Option {
 	opt := func(r *Recorder) {
 		r.blockUnsafeMethods = val
 	}
-
 	return opt
 }
 
@@ -251,7 +248,6 @@ func WithSkipRequestLatency(val bool) Option {
 	opt := func(r *Recorder) {
 		r.skipRequestLatency = val
 	}
-
 	return opt
 }
 
@@ -262,7 +258,6 @@ func WithPassthrough(passfunc PassthroughFunc) Option {
 	opt := func(r *Recorder) {
 		r.passthroughs = append(r.passthroughs, passfunc)
 	}
-
 	return opt
 }
 
@@ -273,7 +268,6 @@ func WithHook(handler HookFunc, kind HookKind) Option {
 		hook := NewHook(handler, kind)
 		r.hooks = append(r.hooks, hook)
 	}
-
 	return opt
 }
 
@@ -284,7 +278,6 @@ func WithMatcher(matcher MatcherFunc) Option {
 	opt := func(r *Recorder) {
 		r.matcher = matcher
 	}
-
 	return opt
 }
 
@@ -296,7 +289,6 @@ func WithReplayableInteractions(val bool) Option {
 	opt := func(r *Recorder) {
 		r.replayableInteractions = val
 	}
-
 	return opt
 }
 
@@ -371,7 +363,6 @@ func (rec *Recorder) getRoundTripper() http.RoundTripper {
 			RoundTripper: rec.realTransport,
 		}
 	}
-
 	return rec.realTransport
 }
 
@@ -625,7 +616,6 @@ func (rec *Recorder) GetDefaultClient() *http.Client {
 	client := &http.Client{
 		Transport: rec,
 	}
-
 	return client
 }
 
