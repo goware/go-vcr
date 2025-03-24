@@ -36,7 +36,7 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/dnaeon/go-vcr.v4/pkg/cassette"
+	"github.com/goware/go-vcr/cassette"
 )
 
 type MatcherFunc = cassette.MatcherFunc
