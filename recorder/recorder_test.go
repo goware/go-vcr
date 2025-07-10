@@ -1271,3 +1271,127 @@ func TestDiscardInteractionsOnSave(t *testing.T) {
 		t.Fatalf("expected %d interactions, got %d", wantInteractions, gotInteractions)
 	}
 }
+
+func TestLazyFileCreation(t *testing.T) {
+	// Test that cassette files are only created when there are interactions to save
+
+	t.Run("ModeRecordOnly - no file created without interactions", func(t *testing.T) {
+		cassPath, err := newCassettePath("test_lazy_record_only")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		opts := []recorder.Option{
+			recorder.WithMode(recorder.ModeRecordOnly),
+		}
+		rec, err := recorder.New(cassPath, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Stop without making any requests
+		if err := rec.Stop(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify file was NOT created
+		if _, err := cassette.Load(cassPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("expected cassette file to not exist when no interactions were recorded")
+		}
+	})
+
+	t.Run("ModeRecordOnce - no file created without interactions", func(t *testing.T) {
+		cassPath, err := newCassettePath("test_lazy_record_once")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rec, err := recorder.New(cassPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Stop without making any requests
+		if err := rec.Stop(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify file was NOT created
+		if _, err := cassette.Load(cassPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("expected cassette file to not exist when no interactions were recorded")
+		}
+	})
+
+	t.Run("ModeReplayWithNewEpisodes - no file created without interactions", func(t *testing.T) {
+		cassPath, err := newCassettePath("test_lazy_replay_with_new")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		opts := []recorder.Option{
+			recorder.WithMode(recorder.ModeReplayWithNewEpisodes),
+		}
+		rec, err := recorder.New(cassPath, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Stop without making any requests
+		if err := rec.Stop(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify file was NOT created
+		if _, err := cassette.Load(cassPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("expected cassette file to not exist when no interactions were recorded")
+		}
+	})
+
+	t.Run("ModeRecordOnly - file created with interactions", func(t *testing.T) {
+		server := newEchoHttpServer()
+		defer server.Close()
+
+		cassPath, err := newCassettePath("test_lazy_with_interactions")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		opts := []recorder.Option{
+			recorder.WithMode(recorder.ModeRecordOnly),
+		}
+		rec, err := recorder.New(cassPath, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Make a request to create an interaction
+		client := rec.GetDefaultClient()
+		tc := testCase{
+			method:            http.MethodGet,
+			wantBody:          "GET go-vcr\n",
+			wantStatus:        http.StatusOK,
+			wantContentLength: 11,
+			path:              "/api/v1/foo",
+		}
+
+		ctx := context.Background()
+		if err := tc.run(ctx, client, server.URL); err != nil {
+			t.Fatal(err)
+		}
+
+		// Stop recorder
+		if err := rec.Stop(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify file WAS created
+		c, err := cassette.Load(cassPath)
+		if err != nil {
+			t.Fatalf("expected cassette file to exist when interactions were recorded: %v", err)
+		}
+
+		if len(c.Interactions) != 1 {
+			t.Fatalf("expected 1 interaction, got %d", len(c.Interactions))
+		}
+	})
+}

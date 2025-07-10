@@ -79,43 +79,24 @@ additional examples.
 ## Custom Request Matching
 
 During replay mode, you can customize the way incoming requests are matched
-against the recorded request/response pairs by defining a `recorder.MatcherFunc`
-function.
+against recorded interactions by implementing `cassette.RequestMatcher` or
+using the built-in matcher with options.
 
-For example, the following matcher will match on method, URL and body:
+For example, to ignore certain headers when matching:
 
 ``` go
-
-func customMatcher(r *http.Request, i cassette.Request) bool {
-	if r.Body == nil || r.Body == http.NoBody {
-		return cassette.DefaultMatcher(r, i)
-	}
-
-	var reqBody []byte
-	var err error
-	reqBody, err = io.ReadAll(r.Body)
-	if err != nil {
-		log.Fatal("failed to read request body")
-	}
-	r.Body.Close()
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(reqBody))
-
-	return r.Method == i.Method && r.URL.String() == i.URL && string(reqBody) == i.Body
-}
-
-...
-
-// Recorder options
-opts := []recorder.Option{
-	recorder.WithCassette("testdata/matchers"),
-	recorder.WithMatcher(customMatcher),
-}
-
-rec, err := recorder.New(opts...)
+rec, err := recorder.New(
+	"testdata/matchers",
+	recorder.WithMatcher(cassette.NewMatcher(
+		cassette.WithIgnoreUserAgent(),
+		cassette.WithIgnoreAuthorization(),
+		cassette.WithIgnoreHeaders("X-Request-Id"),
+	)),
+)
 if err != nil {
-        log.Fatal(err)
+	log.Fatal(err)
 }
-defer rec.Stop() // Make sure recorder is stopped once done with it
+defer rec.Stop()
 
 client := rec.GetDefaultClient()
 resp, err := client.Get("https://www.google.com/")
@@ -155,14 +136,11 @@ hook := func(i *cassette.Interaction) error {
 	return nil
 }
 
-// Recorder options
-opts := []recorder.Option{
-	recorder.WithCassette("testdata/filters"),
+r, err := recorder.New(
+	"testdata/filters",
 	recorder.WithHook(hook, recorder.AfterCaptureHook),
-	recorder.WithMatcher(cassette.NewDefaultMatcher(cassette.WithIgnoreAuthorization())),
-}
-
-r, err := recorder.New(opts...)
+	recorder.WithMatcher(cassette.NewMatcher(cassette.WithIgnoreAuthorization())),
+)
 if err != nil {
 	log.Fatal(err)
 }
@@ -196,13 +174,10 @@ hook := func(i *cassette.Interaction) error {
 	return nil
 }
 
-// Recorder options
-opts := []recorder.Option{
-	recorder.WithCassette("testdata/filters"),
+r, err := recorder.New(
+	"testdata/filters",
 	recorder.WithHook(hook, recorder.BeforeSaveHook),
-}
-
-r, err := recorder.New(opts...)
+)
 if err != nil {
 	log.Fatal(err)
 }
@@ -227,13 +202,10 @@ passthrough := func(req *http.Request) bool {
 	return req.URL.Path == "/login"
 }
 
-// Recorder options
-opts := []recorder.Option{
-	recorder.WithCassette("testdata/filters"),
+r, err := recorder.New(
+	"testdata/filters",
 	recorder.WithPassthrough(passthrough),
-}
-
-r, err := recorder.New(opts...)
+)
 if err != nil {
 	log.Fatal(err)
 }

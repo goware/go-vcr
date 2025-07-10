@@ -112,14 +112,35 @@ func getHasherRequests(t *testing.T) (*http.Request, *http.Request) {
 	return r1, r2
 }
 
+// hashesMatch is a helper that compares two requests by hashing them.
+func hashesMatch(t *testing.T, matcher RequestMatcher, r *http.Request, i Request) bool {
+	t.Helper()
+
+	hash1, err := matcher.Hash(r)
+	if err != nil {
+		t.Fatalf("failed to hash http.Request: %v", err)
+	}
+
+	httpReq, err := toHTTPRequest(i)
+	if err != nil {
+		t.Fatalf("failed to convert Request to http.Request: %v", err)
+	}
+
+	hash2, err := matcher.Hash(httpReq)
+	if err != nil {
+		t.Fatalf("failed to hash converted Request: %v", err)
+	}
+
+	return hash1 == hash2
+}
+
 func TestMatcher(t *testing.T) {
 	t.Run("nil options", func(t *testing.T) {
-		matcherFn := DefaultMatcher
+		matcher := DefaultMatcher
 
 		t.Run("match", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
-
-			if b := matcherFn(r, i); !b {
+			if !hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should have matched")
 			}
 		})
@@ -127,7 +148,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match Proto", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Proto = "foo"
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -135,7 +156,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match ProtoMajor", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.ProtoMajor = 3
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -143,7 +164,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match ProtoMinor", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.ProtoMinor = 5
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -151,7 +172,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match ContentLength", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.ContentLength = r.ContentLength / 2
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -159,7 +180,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match TransferEncoding", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.TransferEncoding = []string{"no", "match"}
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -169,7 +190,7 @@ func TestMatcher(t *testing.T) {
 			r.Trailer = http.Header{
 				"not": {"a", "match"},
 			}
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -177,7 +198,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match Host", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Host = "not.match"
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -185,7 +206,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match RemoteAddr", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.RemoteAddr = "6.6.6.6"
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -193,7 +214,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match RequestURI", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.RequestURI = "GET /not-match HTTP/1.0"
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -201,7 +222,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match Body", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Body = io.NopCloser(strings.NewReader("not a match"))
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -209,7 +230,7 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match Headers", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Header = http.Header{"not": {"a", "match"}}
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -221,7 +242,7 @@ func TestMatcher(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.URL = u
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
@@ -229,14 +250,14 @@ func TestMatcher(t *testing.T) {
 		t.Run("not match Method", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Method = "DELETE"
-			if b := matcherFn(r, i); b {
+			if hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should not have matched")
 			}
 		})
 	})
 
 	t.Run("IgnoreUserAgent", func(t *testing.T) {
-		matcherFn := NewDefaultMatcher(WithIgnoreUserAgent())
+		matcher := NewMatcher(WithIgnoreUserAgent())
 
 		t.Run("match", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
@@ -249,14 +270,14 @@ func TestMatcher(t *testing.T) {
 				"User-Agent": {"baz", "meh"},
 			}
 
-			if b := matcherFn(r, i); !b {
+			if !hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should have matched")
 			}
 		})
 	})
 
 	t.Run("IgnoreAuthorization", func(t *testing.T) {
-		matcherFn := NewDefaultMatcher(WithIgnoreAuthorization())
+		matcher := NewMatcher(WithIgnoreAuthorization())
 
 		t.Run("match", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
@@ -267,14 +288,14 @@ func TestMatcher(t *testing.T) {
 
 			i.Headers = http.Header{}
 
-			if b := matcherFn(r, i); !b {
+			if !hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should have matched")
 			}
 		})
 	})
 
 	t.Run("IgnoreHeaders", func(t *testing.T) {
-		matcherFn := NewDefaultMatcher(WithIgnoreHeaders("Header-One", "Header-Two"), WithIgnoreUserAgent(), WithIgnoreAuthorization())
+		matcher := NewMatcher(WithIgnoreHeaders("Header-One", "Header-Two"), WithIgnoreUserAgent(), WithIgnoreAuthorization())
 
 		t.Run("match", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
@@ -291,26 +312,26 @@ func TestMatcher(t *testing.T) {
 				"Authorization": {"Bearer xyz"},
 			}
 
-			if b := matcherFn(r, i); !b {
+			if !hashesMatch(t, matcher, r, i) {
 				t.Fatalf("request should have matched")
 			}
 		})
 	})
 }
 
-func TestHasher(t *testing.T) {
+func TestMatcherHash(t *testing.T) {
 	t.Run("nil options", func(t *testing.T) {
-		hasherFn := NewDefaultHasher()
+		matcher := NewMatcher()
 
 		t.Run("match", func(t *testing.T) {
 			r1, r2 := getHasherRequests(t)
 
-			hash1, err := hasherFn(r1)
+			hash1, err := matcher.Hash(r1)
 			if err != nil {
 				t.Fatalf("hasher failed for r1: %v", err)
 			}
 
-			hash2, err := hasherFn(r2)
+			hash2, err := matcher.Hash(r2)
 			if err != nil {
 				t.Fatalf("hasher failed for r2: %v", err)
 			}
@@ -327,11 +348,11 @@ func TestHasher(t *testing.T) {
 			r1, r2 := getHasherRequests(t)
 			r2.Method = "DELETE" // Change one request
 
-			hash1, err := hasherFn(r1)
+			hash1, err := matcher.Hash(r1)
 			if err != nil {
 				t.Fatalf("hasher failed for r1: %v", err)
 			}
-			hash2, err := hasherFn(r2)
+			hash2, err := matcher.Hash(r2)
 			if err != nil {
 				t.Fatalf("hasher failed for r2: %v", err)
 			}
@@ -343,7 +364,7 @@ func TestHasher(t *testing.T) {
 	})
 
 	t.Run("WithIgnoreHeaders", func(t *testing.T) {
-		hasherFn := NewDefaultHasher(WithIgnoreHeaders("X-Custom-Header", "User-Agent"))
+		matcher := NewMatcher(WithIgnoreHeaders("X-Custom-Header", "User-Agent"))
 
 		t.Run("ignores specified headers", func(t *testing.T) {
 			r1, r2 := getHasherRequests(t)
@@ -354,8 +375,8 @@ func TestHasher(t *testing.T) {
 			r2.Header.Set("X-Custom-Header", "value-2")
 			r2.Header.Set("User-Agent", "agent-2")
 
-			hash1, _ := hasherFn(r1)
-			hash2, _ := hasherFn(r2)
+			hash1, _ := matcher.Hash(r1)
+			hash2, _ := matcher.Hash(r2)
 
 			if hash1 != hash2 {
 				t.Error("expected hashes to be identical when ignored headers differ")
@@ -369,8 +390,8 @@ func TestHasher(t *testing.T) {
 			r1.Header.Set("X-Important-Header", "value-1")
 			r2.Header.Set("X-Important-Header", "value-2")
 
-			hash1, _ := hasherFn(r1)
-			hash2, _ := hasherFn(r2)
+			hash1, _ := matcher.Hash(r1)
+			hash2, _ := matcher.Hash(r2)
 
 			if hash1 == hash2 {
 				t.Error("expected hashes to be different when a non-ignored header differs")
@@ -379,15 +400,15 @@ func TestHasher(t *testing.T) {
 	})
 
 	t.Run("WithIgnoreUserAgent", func(t *testing.T) {
-		hasherFn := NewDefaultHasher(WithIgnoreUserAgent())
+		matcher := NewMatcher(WithIgnoreUserAgent())
 
 		t.Run("ignores user agent", func(t *testing.T) {
 			r1, r2 := getHasherRequests(t)
 			r1.Header.Set("User-Agent", "agent-1")
 			r2.Header.Set("User-Agent", "agent-2")
 
-			hash1, _ := hasherFn(r1)
-			hash2, _ := hasherFn(r2)
+			hash1, _ := matcher.Hash(r1)
+			hash2, _ := matcher.Hash(r2)
 
 			if hash1 != hash2 {
 				t.Error("expected hashes to be identical when User-Agent differs")
@@ -396,15 +417,15 @@ func TestHasher(t *testing.T) {
 	})
 
 	t.Run("WithIgnoreAuthorization", func(t *testing.T) {
-		hasherFn := NewDefaultHasher(WithIgnoreAuthorization())
+		matcher := NewMatcher(WithIgnoreAuthorization())
 
 		t.Run("ignores authorization", func(t *testing.T) {
 			r1, r2 := getHasherRequests(t)
 			r1.Header.Set("Authorization", "Bearer token1")
 			r2.Header.Set("Authorization", "Bearer token2")
 
-			hash1, _ := hasherFn(r1)
-			hash2, _ := hasherFn(r2)
+			hash1, _ := matcher.Hash(r1)
+			hash2, _ := matcher.Hash(r2)
 
 			if hash1 != hash2 {
 				t.Error("expected hashes to be identical when Authorization differs")

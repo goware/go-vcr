@@ -25,14 +25,13 @@
 package cassette
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -121,6 +120,10 @@ type Interaction struct {
 	// ID is the id of the interaction
 	ID int `yaml:"id"`
 
+	// Hash is the pre-computed hash of the request for fast matching.
+	// If empty, the hash will be computed on load.
+	Hash string `yaml:"hash,omitempty"`
+
 	// Request is the recorded request
 	Request Request `yaml:"request"`
 
@@ -199,105 +202,61 @@ func (i *Interaction) GetHTTPResponse() (*http.Response, error) {
 	return resp, nil
 }
 
-// MatcherFunc is a predicate, which returns true when the actual request
-// matches an interaction from the cassette. It is used for matching if a
-// HasherFunc is not provided.
-type MatcherFunc func(*http.Request, Request) bool
+// RequestMatcher generates a deterministic hash from an HTTP request for matching.
+// Two requests that should be considered equivalent must produce the same hash.
+type RequestMatcher interface {
+	Hash(r *http.Request) (string, error)
+}
 
-// HasherFunc generates a hash from an HTTP request for fast matching.
-// The hash should be deterministic and identical for equivalent requests.
-type HasherFunc func(r *http.Request) (string, error)
+// MatcherOption is a function which configures a matcher.
+type MatcherOption func(m *defaultMatcher)
 
-// defaultMatcher is the default matcher used to match HTTP requests with
-// recorded interactions.
+// WithIgnoreUserAgent is a [MatcherOption] that configures the matcher
+// to ignore the User-Agent HTTP header when matching.
+func WithIgnoreUserAgent() MatcherOption {
+	return func(m *defaultMatcher) {
+		m.ignoreHeaders = append(m.ignoreHeaders, "User-Agent")
+	}
+}
+
+// WithIgnoreAuthorization is a [MatcherOption] that configures the matcher
+// to ignore the Authorization HTTP header when matching.
+func WithIgnoreAuthorization() MatcherOption {
+	return func(m *defaultMatcher) {
+		m.ignoreHeaders = append(m.ignoreHeaders, "Authorization")
+	}
+}
+
+// WithIgnoreHeaders is a [MatcherOption] that configures the matcher
+// to ignore the specified HTTP headers when matching.
+func WithIgnoreHeaders(val ...string) MatcherOption {
+	return func(m *defaultMatcher) {
+		m.ignoreHeaders = append(m.ignoreHeaders, val...)
+	}
+}
+
+// defaultMatcher is the default RequestMatcher implementation.
 type defaultMatcher struct {
-	// If set, the default matcher will ignore matching on any of the
-	// defined headers.
 	ignoreHeaders []string
 }
 
-// DefaultMatcherOption is a function which configures the default matcher.
-type DefaultMatcherOption func(m *defaultMatcher)
-
-// WithIgnoreUserAgent is a [DefaultMatcherOption], which configures the default
-// matcher to ignore matching on the User-Agent HTTP header.
-func WithIgnoreUserAgent() DefaultMatcherOption {
-	opt := func(m *defaultMatcher) {
-		m.ignoreHeaders = append(m.ignoreHeaders, "User-Agent")
-	}
-	return opt
-}
-
-// WithIgnoreAuthorization is a [DefaultMatcherOption], which configures the default
-// matcher to ignore matching on the Authorization HTTP header.
-func WithIgnoreAuthorization() DefaultMatcherOption {
-	opt := func(m *defaultMatcher) {
-		m.ignoreHeaders = append(m.ignoreHeaders, "Authorization")
-	}
-	return opt
-}
-
-// WithIgnoreHeaders is a [DefaultMatcherOption], which configures the default
-// matcher to ignore matching on the defined HTTP headers.
-func WithIgnoreHeaders(val ...string) DefaultMatcherOption {
-	opt := func(m *defaultMatcher) {
-		m.ignoreHeaders = append(m.ignoreHeaders, val...)
-	}
-	return opt
-}
-
-// NewDefaultMatcher returns the default matcher.
-func NewDefaultMatcher(opts ...DefaultMatcherOption) MatcherFunc {
-	m := &defaultMatcher{}
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m.matcher
-}
-
-// NewDefaultHasher returns the default hasher.
-func NewDefaultHasher(opts ...DefaultMatcherOption) HasherFunc {
-	m := &defaultMatcher{}
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m.hasher
-}
-
-// matcher is a predicate which matches the provided HTTP request against a
-// recorded interaction request by comparing their hashes.
-func (m *defaultMatcher) matcher(r *http.Request, i Request) bool {
-	hasher := defaultInteractionRequestHasher
-
-	reqHash, err := hasher(r, m.ignoreHeaders)
-	if err != nil {
-		return false
-	}
-
-	interactionReq, err := toHTTPRequest(i)
-	if err != nil {
-		return false
-	}
-
-	recHash, err := hasher(interactionReq, m.ignoreHeaders)
-	if err != nil {
-		return false
-	}
-
-	return reqHash == recHash
-}
-
-// hasher generates a hash from an HTTP request using the default hashing logic.
-func (m *defaultMatcher) hasher(r *http.Request) (string, error) {
+// Hash implements RequestMatcher.
+func (m *defaultMatcher) Hash(r *http.Request) (string, error) {
 	return defaultInteractionRequestHasher(r, m.ignoreHeaders)
 }
 
-// DefaultMatcher is the default matcher used to match HTTP requests with
-// recorded interactions.
-var DefaultMatcher = NewDefaultMatcher()
+// NewMatcher creates a new RequestMatcher with the given options.
+func NewMatcher(opts ...MatcherOption) RequestMatcher {
+	m := &defaultMatcher{}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
 
-// DefaultHasher is the default hasher used to generate hashes for matching.
-var DefaultHasher = NewDefaultHasher()
+// DefaultMatcher is the default RequestMatcher used to match HTTP requests
+// with recorded interactions.
+var DefaultMatcher = NewMatcher()
 
 // Cassette represents a cassette containing recorded interactions.
 type Cassette struct {
@@ -319,13 +278,8 @@ type Cassette struct {
 	// CompressionEnabled defines whether to compress the cassette
 	CompressionEnabled bool `yaml:"compression_enabled,omitempty"`
 
-	// Matcher matches an actual request with an interaction.
-	// It is only used if Hasher is nil.
-	Matcher MatcherFunc `yaml:"-"`
-
-	// Hasher generates a hash from a request for fast matching.
-	// If set, this takes precedence over Matcher.
-	Hasher HasherFunc `yaml:"-"`
+	// Matcher generates hashes from requests for matching.
+	Matcher RequestMatcher `yaml:"-"`
 
 	// IsNew specifies whether this is a newly created cassette.
 	// Returns false, when the cassette was loaded from an
@@ -338,20 +292,17 @@ type Cassette struct {
 
 // New creates a new empty cassette
 func New(name string) *Cassette {
-	c := &Cassette{
+	return &Cassette{
 		Name:                   name,
 		Version:                CassetteFormatVersion,
 		Interactions:           make([]*Interaction, 0),
 		Matcher:                DefaultMatcher,
-		Hasher:                 DefaultHasher,
 		ReplayableInteractions: false,
 		CompressionEnabled:     false,
 		IsNew:                  true,
 		nextInteractionId:      0,
 		hashIndex:              make(map[string][]int),
 	}
-
-	return c
 }
 
 // File returns the cassette file name as written on disk.
@@ -396,14 +347,9 @@ func (c *Cassette) Load() error {
 		reader = gz
 	}
 
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("failed to read cassette data from %s: %w", file, err)
-	}
-
 	c.IsNew = false
-	if err := yaml.Unmarshal(data, c); err != nil {
-		return fmt.Errorf("failed to unmarshal cassette file %s: %w", file, err)
+	if err := yaml.NewDecoder(reader).Decode(c); err != nil {
+		return fmt.Errorf("failed to decode cassette file %s: %w", file, err)
 	}
 
 	if c.Version != CassetteFormatVersion {
@@ -412,8 +358,16 @@ func (c *Cassette) Load() error {
 
 	c.nextInteractionId = len(c.Interactions)
 
-	if err := c.buildHashIndex(); err != nil {
+	upgraded, err := c.buildHashIndex()
+	if err != nil {
 		return fmt.Errorf("failed to build hash index for cassette %s: %w", c.Name, err)
+	}
+
+	// Auto-upgrade: save cassette with computed hashes for faster future loads
+	if upgraded {
+		if err := c.Save(); err != nil {
+			slog.Warn("failed to save upgraded cassette", "cassette", c.Name, "error", err)
+		}
 	}
 
 	return nil
@@ -431,30 +385,37 @@ func Load(name string) (*Cassette, error) {
 	return c, nil
 }
 
-func (c *Cassette) buildHashIndex() error {
-	if c.Hasher == nil {
-		return nil
+// buildHashIndex builds the hash index for fast lookups.
+// Returns true if any hashes were computed (i.e., cassette needs upgrade).
+func (c *Cassette) buildHashIndex() (upgraded bool, err error) {
+	if c.Matcher == nil {
+		return false, nil
 	}
 
 	for i, interaction := range c.Interactions {
-		req, err := interaction.GetHTTPRequest()
-		if err != nil {
-			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", interaction.ID, err)
-		}
+		hash := interaction.Hash
 
-		hash, err := c.Hasher(req)
-		if err != nil {
-			return fmt.Errorf("failed to hash request for interaction %d: %w", interaction.ID, err)
-		}
+		// Fall back to computing hash for old cassettes without pre-computed hashes
+		if hash == "" {
+			req, err := interaction.GetHTTPRequest()
+			if err != nil {
+				return false, fmt.Errorf("failed to get HTTP request for interaction %d: %w", interaction.ID, err)
+			}
 
-		if _, exists := c.hashIndex[hash]; !exists {
-			c.hashIndex[hash] = make([]int, 0)
+			hash, err = c.Matcher.Hash(req)
+			if err != nil {
+				return false, fmt.Errorf("failed to hash request for interaction %d: %w", interaction.ID, err)
+			}
+
+			// Store computed hash for persistence
+			interaction.Hash = hash
+			upgraded = true
 		}
 
 		c.hashIndex[hash] = append(c.hashIndex[hash], i)
 	}
 
-	return nil
+	return upgraded, nil
 }
 
 // AddInteraction appends a new interaction to the cassette
@@ -462,20 +423,22 @@ func (c *Cassette) AddInteraction(i *Interaction) error {
 	c.Lock()
 	defer c.Unlock()
 	i.ID = c.nextInteractionId
-	c.nextInteractionId += 1
+	c.nextInteractionId++
 
-	if c.Hasher != nil {
+	if c.Matcher != nil {
 		req, err := i.GetHTTPRequest()
 		if err != nil {
 			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", i.ID, err)
 		}
 
-		hash, err := c.Hasher(req)
+		hash, err := c.Matcher.Hash(req)
 		if err != nil {
 			return fmt.Errorf("failed to hash request for interaction %d: %w", i.ID, err)
 		}
 
-		c.hashIndex[hash] = append(c.hashIndex[hash], i.ID)
+		// Store hash in interaction for persistence
+		i.Hash = hash
+		c.hashIndex[hash] = append(c.hashIndex[hash], len(c.Interactions))
 	}
 
 	c.Interactions = append(c.Interactions, i)
@@ -484,62 +447,54 @@ func (c *Cassette) AddInteraction(i *Interaction) error {
 
 // GetInteraction retrieves a recorded request/response interaction
 func (c *Cassette) GetInteraction(r *http.Request) (*Interaction, error) {
-	return c.getInteraction(r)
-}
-
-// getInteraction searches for the interaction corresponding to the given HTTP
-// request, using either hash-based or matcher-based lookup.
-func (c *Cassette) getInteraction(r *http.Request) (*Interaction, error) {
 	c.Lock()
 	defer c.Unlock()
+
+	if c.Matcher == nil {
+		return nil, fmt.Errorf("cassette has no matcher defined")
+	}
+
 	if r.Body == nil {
 		r.Body = http.NoBody
 	}
 
-	var interaction *Interaction
-	var err error
-
-	if c.Hasher != nil {
-		interaction, err = c.getInteractionByHash(r)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get interaction by hash: %w", err)
-		}
-	} else {
-		interaction, err = c.getInteractionByMatcher(r)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get interaction by matcher: %w", err)
-		}
+	// Read and cache the request body.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request body for matching: %w", err)
 	}
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	return c.overrideRecordedRequestBody(r, interaction)
-}
-
-func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
-	if c.Hasher == nil {
-		return nil, fmt.Errorf("cassette has no hasher defined")
-	}
-
-	reqHash, err := c.Hasher(r)
+	reqHash, err := c.Matcher.Hash(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash request: %w", err)
 	}
 
-	interactions, ok := c.hashIndex[reqHash]
+	interactionIndices, ok := c.hashIndex[reqHash]
 	if !ok {
+		slog.Warn("no interactions found for request hash", "hash", reqHash)
 		return nil, ErrInteractionNotFound
 	}
 
-	var interaction *Interaction
-	for _, id := range interactions {
-		interaction = c.Interactions[id]
+	var lastReplayedIdx int = -1
+	for _, idx := range interactionIndices {
+		interaction := c.Interactions[idx]
 		if !c.ReplayableInteractions && interaction.replayed {
+			lastReplayedIdx = idx
 			continue
 		}
 
 		interaction.replayed = true
-		return interaction, nil
+		return c.overrideRecordedRequestBody(r, interaction, bodyBytes)
 	}
 
+	if lastReplayedIdx != -1 {
+		slog.Warn("all interactions for request hash have been replayed, returning last one", "hash", reqHash, "interaction_id", c.Interactions[lastReplayedIdx].ID)
+		return c.overrideRecordedRequestBody(r, c.Interactions[lastReplayedIdx], bodyBytes)
+	}
+
+	slog.Warn("no matching interaction found for request hash", "hash", reqHash)
 	return nil, ErrInteractionNotFound
 }
 
@@ -547,57 +502,23 @@ func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
 // overrides the recorded request body in the interaction with the actual
 // request.  This is useful when the request body contains dynamic data that
 // needs to be re-used in the response, such as JSON-RPC id fields.
-func (c *Cassette) overrideRecordedRequestBody(r *http.Request, originalInteraction *Interaction) (*Interaction, error) {
-	buf, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body: %w", err)
-	}
+func (c *Cassette) overrideRecordedRequestBody(r *http.Request, originalInteraction *Interaction, bodyBytes []byte) (*Interaction, error) {
+	// Restore body for form parsing.
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	r.Body.Close()
-	r.Body = io.NopCloser(strings.NewReader(string(buf)))
+	_ = r.ParseForm()
 
-	reqBytes, err := httputil.DumpRequestOut(r, true)
-	if err != nil {
-		return nil, err
-	}
+	// Restore body again for further use.
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	reqBuffer := bytes.NewBuffer(reqBytes)
-	copiedReq, err := http.ReadRequest(bufio.NewReader(reqBuffer))
-	if err != nil {
-		return nil, err
-	}
-
-	err = copiedReq.ParseForm()
-	if err != nil {
-		return nil, err
-	}
-
+	// Create a copy of the interaction to modify.
 	interaction := *originalInteraction
 	interaction.Request = originalInteraction.Request
 
-	interaction.Request.Body = string(buf)
-	interaction.Request.Form = copiedReq.PostForm
+	interaction.Request.Body = string(bodyBytes)
+	interaction.Request.Form = r.PostForm
 
 	return &interaction, nil
-}
-
-func (c *Cassette) getInteractionByMatcher(r *http.Request) (*Interaction, error) {
-	if c.Matcher == nil {
-		return nil, fmt.Errorf("cassette has no matcher defined")
-	}
-
-	for _, interaction := range c.Interactions {
-		if !c.ReplayableInteractions && interaction.replayed {
-			continue
-		}
-
-		if c.Matcher(r, interaction.Request) {
-			interaction.replayed = true
-			return interaction, nil
-		}
-	}
-
-	return nil, ErrInteractionNotFound
 }
 
 // Save writes the cassette data on disk for future re-use
@@ -624,7 +545,7 @@ func (c *Cassette) Save() error {
 		if !i.DiscardOnSave {
 			i.ID = nextId
 			interactions = append(interactions, i)
-			nextId += 1
+			nextId++
 		}
 	}
 	c.Interactions = interactions

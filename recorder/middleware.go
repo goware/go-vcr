@@ -5,20 +5,32 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 )
+
+// bufferPool reduces allocations for request body buffering in the middleware.
+var bufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
 
 // HTTPMiddleware intercepts and records all incoming requests and the server's response
 func (rec *Recorder) HTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ww := newPassthrough(w)
 
+		// Get a pooled buffer for the request body.
+		body := bufferPool.Get().(*bytes.Buffer)
+		body.Reset()
+		defer bufferPool.Put(body)
+
 		// Tee the body so it can be read by the next handler and by the recorder
-		body := &bytes.Buffer{}
 		r.Body = io.NopCloser(io.TeeReader(r.Body, body))
 
 		next.ServeHTTP(ww, r)
 
-		r.Body = io.NopCloser(body)
+		r.Body = io.NopCloser(bytes.NewReader(body.Bytes()))
 
 		// On the server side, requests do not have Host and Scheme so it must be set
 		r.URL.Host = "go-vcr"

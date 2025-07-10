@@ -26,26 +26,16 @@
 package recorder
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"time"
 
 	"github.com/goware/go-vcr/cassette"
 )
-
-// MatcherFunc is a predicate that returns true when the actual request
-// matches an interaction from the cassette. It is only used if HasherFunc is not provided.
-type MatcherFunc = cassette.MatcherFunc
-
-// HasherFunc generates a hash from an HTTP request for fast matching.
-// The hash should be deterministic and identical for equivalent requests.
-type HasherFunc = cassette.HasherFunc
 
 // ErrNoCassetteName is an error, which is returned when the recorder was
 // created without specifying a cassette name.
@@ -155,19 +145,20 @@ type PassthroughFunc func(req *http.Request) bool
 // are defined as part of RFC 9110, section 9.2.1.
 var ErrUnsafeRequestMethod = errors.New("request uses an unsafe method")
 
+// safeMethods defines HTTP methods considered "safe" per RFC 9110, section 9.2.1.
+var safeMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodOptions: true,
+	http.MethodTrace:   true,
+}
+
 type blockUnsafeMethodsRoundTripper struct {
 	RoundTripper http.RoundTripper
 }
 
-// TODO: rename this method, "unsafe" is a strange name / term..
 func (r *blockUnsafeMethodsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	safeMethods := map[string]bool{
-		http.MethodGet:     true,
-		http.MethodHead:    true,
-		http.MethodOptions: true,
-		http.MethodTrace:   true,
-	}
-	if _, ok := safeMethods[req.Method]; !ok {
+	if !safeMethods[req.Method] {
 		return nil, ErrUnsafeRequestMethod
 	}
 	return r.RoundTripper.RoundTrip(req)
@@ -206,13 +197,8 @@ type Recorder struct {
 	// stages of the playback.
 	hooks []*Hook
 
-	// matcher is the [MatcherFunc] predicate used to match HTTP requests
-	// against recorded interactions. It is only used if a hasher is not configured.
-	matcher MatcherFunc
-
-	// hasher generates hashes from HTTP requests for fast matching.
-	// If set, this takes precedence over the matcher.
-	hasher HasherFunc
+	// matcher generates hashes from HTTP requests for matching.
+	matcher cassette.RequestMatcher
 
 	// replayableInteractions specifies whether to allow interactions to be
 	// replayed multiple times.
@@ -225,38 +211,34 @@ type Recorder struct {
 type Option func(r *Recorder)
 
 func WithCompression(val bool) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.withCompression = val
 	}
-	return opt
 }
 
 // WithMode is an [Option], which configures the [Recorder] to run in the
 // specified mode.
 func WithMode(mode Mode) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.mode = mode
 	}
-	return opt
 }
 
 // WithRealTransport is an [Option], which configures the [Recorder] to use the
 // specified [http.RoundTripper] when making actual HTTP requests.
 func WithRealTransport(rt http.RoundTripper) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.realTransport = rt
 	}
-	return opt
 }
 
 // WithBlockUnsafeMethods is an [Option], which configures the [Recorder] to
 // block HTTP requests, which are not considered "Safe Methods", according to
 // RFC 9110, section 9.2.1.
 func WithBlockUnsafeMethods(val bool) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.blockUnsafeMethods = val
 	}
-	return opt
 }
 
 // WithSkipRequestLatency is an [Option], which configures the [Recorder] whether
@@ -264,50 +246,60 @@ func WithBlockUnsafeMethods(val bool) Option {
 // will block for the period of time taken by the original request to simulate
 // the latency between the recorder and the remote endpoints.
 func WithSkipRequestLatency(val bool) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.skipRequestLatency = val
 	}
-	return opt
 }
 
 // WithPassthrough is an [Option], which configures the [Recorder] to
 // passthrough requests for requests which satisfy the provided
 // [PassthroughFunc] predicate.
 func WithPassthrough(passfunc PassthroughFunc) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.passthroughs = append(r.passthroughs, passfunc)
 	}
-	return opt
 }
 
 // WithHook is an [Option], which configures the [Recorder] to invoke the
 // provided hook at the specified playback stage.
 func WithHook(handler HookFunc, kind HookKind) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		hook := NewHook(handler, kind)
 		r.hooks = append(r.hooks, hook)
 	}
-	return opt
 }
 
-// WithMatcher is an [Option], which configures the [Recorder] to use the
-// provided [MatcherFunc] predicate when matching HTTP requests against recorded
-// interactions. This is only used if a hasher is not configured.
-func WithMatcher(matcher MatcherFunc) Option {
-	opt := func(r *Recorder) {
+// WithMatcher is an [Option] that configures the [Recorder] to use the
+// provided [cassette.RequestMatcher] for matching HTTP requests against recorded
+// interactions.
+func WithMatcher(matcher cassette.RequestMatcher) Option {
+	return func(r *Recorder) {
 		r.matcher = matcher
 	}
-	return opt
 }
 
-// WithHasher is an [Option], which configures the [Recorder] to use the
-// provided [HasherFunc] for matching requests. If set, this takes
-// precedence over any configured matcher.
+// HasherFunc is kept for backward compatibility.
+//
+// Deprecated: Use [cassette.RequestMatcher] instead.
+type HasherFunc = func(r *http.Request) (string, error)
+
+// hasherAdapter wraps a HasherFunc to implement cassette.RequestMatcher.
+type hasherAdapter struct {
+	fn HasherFunc
+}
+
+func (h *hasherAdapter) Hash(r *http.Request) (string, error) {
+	return h.fn(r)
+}
+
+// WithHasher is an [Option] that configures the [Recorder] to use the
+// provided [HasherFunc] for matching requests.
+//
+// Deprecated: Use [WithMatcher] with a [cassette.RequestMatcher] instead.
 func WithHasher(hasher HasherFunc) Option {
-	opt := func(r *Recorder) {
-		r.hasher = hasher
+	return func(r *Recorder) {
+		r.matcher = &hasherAdapter{fn: hasher}
 	}
-	return opt
 }
 
 // WithReplayableInteractions is an [Option], which configures the [Recorder] to
@@ -315,10 +307,9 @@ func WithHasher(hasher HasherFunc) Option {
 // when you need to hit the same endpoint multiple times and want to replay the
 // interaction from the cassette each time.
 func WithReplayableInteractions(val bool) Option {
-	opt := func(r *Recorder) {
+	return func(r *Recorder) {
 		r.replayableInteractions = val
 	}
-	return opt
 }
 
 // New creates a new [Recorder] and configures it using the provided options.
@@ -332,7 +323,6 @@ func New(cassetteName string, opts ...Option) (*Recorder, error) {
 		blockUnsafeMethods:     false,
 		skipRequestLatency:     false,
 		matcher:                cassette.DefaultMatcher,
-		hasher:                 cassette.DefaultHasher,
 		replayableInteractions: false,
 	}
 
@@ -362,7 +352,6 @@ func (rec *Recorder) getCassette() (*cassette.Cassette, error) {
 	// Configure the cassette based on the recorder configuration
 	tape.ReplayableInteractions = rec.replayableInteractions
 	tape.Matcher = rec.matcher
-	tape.Hasher = rec.hasher
 	tape.CompressionEnabled = rec.withCompression
 
 	_, statErr := os.Stat(tape.File())
@@ -463,40 +452,34 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 		break
 	}
 
-	// Copy the original request, so we can read the form values
-	reqBytes, err := httputil.DumpRequestOut(r, true)
-	if err != nil {
-		return nil, err
-	}
-
-	reqBuffer := bytes.NewBuffer(reqBytes)
-	copiedReq, err := http.ReadRequest(bufio.NewReader(reqBuffer))
-	if err != nil {
-		return nil, err
-	}
-
-	err = copiedReq.ParseForm()
-	if err != nil {
-		return nil, err
-	}
-
-	reqBody := &bytes.Buffer{}
+	// Read and cache the request body for recording and form parsing.
+	var bodyBytes []byte
 	if r.Body != nil && r.Body != http.NoBody {
-		// Record the request body so we can add it to the cassette
-		r.Body = io.NopCloser(io.TeeReader(r.Body, reqBody))
-		if serverResponse != nil {
-			// when serverResponse is provided by middleware, it has to be read in order
-			// for reqBody buffer to be populated
-			_, _ = io.ReadAll(r.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
 		}
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	// Parse form values directly from the original request.
+	// This is much cheaper than DumpRequestOut + ReadRequest.
+	if err := r.ParseForm(); err != nil {
+		return nil, err
+	}
+
+	// Restore body for RoundTrip (only needed when not using serverResponse)
+	if serverResponse == nil && len(bodyBytes) > 0 {
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	// Perform request to it's original destination and record the interactions
 	// If serverResponse is provided, use it instead
-	var start time.Time
-	start = time.Now()
+	start := time.Now()
 	resp := serverResponse
 	if resp == nil {
+		var err error
 		resp, err = rec.getRoundTripper().RoundTrip(r)
 		if err != nil {
 			return nil, err
@@ -522,8 +505,8 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 			Host:             r.Host,
 			RemoteAddr:       r.RemoteAddr,
 			RequestURI:       r.RequestURI,
-			Body:             reqBody.String(),
-			Form:             copiedReq.PostForm,
+			Body:             string(bodyBytes),
+			Form:             r.PostForm,
 			Headers:          r.Header,
 			URL:              r.URL.String(),
 			Method:           r.Method,
@@ -563,16 +546,23 @@ func (rec *Recorder) Stop() error {
 	_, err := os.Stat(cassetteFile)
 	cassetteExists := !os.IsNotExist(err)
 
+	// Only save if there are interactions to save
+	hasInteractions := len(rec.cassette.Interactions) > 0
+
 	// Nothing to do for ModeReplayOnly and ModePassthrough here
 	switch {
 	case rec.mode == ModeRecordOnly || rec.mode == ModeReplayWithNewEpisodes:
-		if err := rec.persistCassette(); err != nil {
-			return err
+		if hasInteractions {
+			if err := rec.persistCassette(); err != nil {
+				return err
+			}
 		}
 
 	case rec.mode == ModeRecordOnce && !cassetteExists:
-		if err := rec.persistCassette(); err != nil {
-			return err
+		if hasInteractions {
+			if err := rec.persistCassette(); err != nil {
+				return err
+			}
 		}
 	}
 
