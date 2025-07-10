@@ -563,16 +563,23 @@ func (rec *Recorder) Stop() error {
 	_, err := os.Stat(cassetteFile)
 	cassetteExists := !os.IsNotExist(err)
 
+	// Only save if there are interactions to save
+	hasInteractions := len(rec.cassette.Interactions) > 0
+
 	// Nothing to do for ModeReplayOnly and ModePassthrough here
 	switch {
 	case rec.mode == ModeRecordOnly || rec.mode == ModeReplayWithNewEpisodes:
-		if err := rec.persistCassette(); err != nil {
-			return err
+		if hasInteractions {
+			if err := rec.persistCassette(); err != nil {
+				return err
+			}
 		}
 
 	case rec.mode == ModeRecordOnce && !cassetteExists:
-		if err := rec.persistCassette(); err != nil {
-			return err
+		if hasInteractions {
+			if err := rec.persistCassette(); err != nil {
+				return err
+			}
 		}
 	}
 
