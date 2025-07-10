@@ -587,7 +587,7 @@ func TestPassthroughMode(t *testing.T) {
 	// The file should not exists, since we haven't been recording
 	rec.Stop()
 
-	if _, err := cassette.Load(cassPath); !os.IsNotExist(err) {
+	if _, err := cassette.Load(cassPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 }

@@ -39,7 +39,13 @@ import (
 	"github.com/goware/go-vcr/cassette"
 )
 
+// MatcherFunc is a predicate that returns true when the actual request
+// matches an interaction from the cassette. It is only used if HasherFunc is not provided.
 type MatcherFunc = cassette.MatcherFunc
+
+// HasherFunc generates a hash from an HTTP request for fast matching.
+// The hash should be deterministic and identical for equivalent requests.
+type HasherFunc = cassette.HasherFunc
 
 // ErrNoCassetteName is an error, which is returned when the recorder was
 // created without specifying a cassette name.
@@ -201,16 +207,29 @@ type Recorder struct {
 	hooks []*Hook
 
 	// matcher is the [MatcherFunc] predicate used to match HTTP requests
-	// against recorded interactions.
+	// against recorded interactions. It is only used if a hasher is not configured.
 	matcher MatcherFunc
+
+	// hasher generates hashes from HTTP requests for fast matching.
+	// If set, this takes precedence over the matcher.
+	hasher HasherFunc
 
 	// replayableInteractions specifies whether to allow interactions to be
 	// replayed multiple times.
 	replayableInteractions bool
+
+	withCompression bool
 }
 
 // Option is a function which configures the [Recorder].
 type Option func(r *Recorder)
+
+func WithCompression(val bool) Option {
+	opt := func(r *Recorder) {
+		r.withCompression = val
+	}
+	return opt
+}
 
 // WithMode is an [Option], which configures the [Recorder] to run in the
 // specified mode.
@@ -271,12 +290,22 @@ func WithHook(handler HookFunc, kind HookKind) Option {
 	return opt
 }
 
-// WithMatchers is an [Option], which configures the [Recorder] to use the
-// provided [MatcherFunc] predicate when matching HTTP requests against record
-// interactions.
+// WithMatcher is an [Option], which configures the [Recorder] to use the
+// provided [MatcherFunc] predicate when matching HTTP requests against recorded
+// interactions. This is only used if a hasher is not configured.
 func WithMatcher(matcher MatcherFunc) Option {
 	opt := func(r *Recorder) {
 		r.matcher = matcher
+	}
+	return opt
+}
+
+// WithHasher is an [Option], which configures the [Recorder] to use the
+// provided [HasherFunc] for matching requests. If set, this takes
+// precedence over any configured matcher.
+func WithHasher(hasher HasherFunc) Option {
+	opt := func(r *Recorder) {
+		r.hasher = hasher
 	}
 	return opt
 }
@@ -303,6 +332,7 @@ func New(cassetteName string, opts ...Option) (*Recorder, error) {
 		blockUnsafeMethods:     false,
 		skipRequestLatency:     false,
 		matcher:                cassette.DefaultMatcher,
+		hasher:                 cassette.DefaultHasher,
 		replayableInteractions: false,
 	}
 
@@ -311,13 +341,11 @@ func New(cassetteName string, opts ...Option) (*Recorder, error) {
 	}
 
 	// Configure the cassette based on the recorder configuration
-	c, err := r.getCassette()
+	var err error
+	r.cassette, err = r.getCassette()
 	if err != nil {
 		return nil, err
 	}
-	r.cassette = c
-	r.cassette.Matcher = r.matcher
-	r.cassette.ReplayableInteractions = r.replayableInteractions
 
 	return r, nil
 }
@@ -329,31 +357,52 @@ func (rec *Recorder) getCassette() (*cassette.Cassette, error) {
 		return nil, ErrNoCassetteName
 	}
 
-	// Create or the cassette depending on the mode we are operating in.
-	cassetteFile := cassette.New(rec.cassetteName).File
-	_, err := os.Stat(cassetteFile)
-	cassetteExists := !os.IsNotExist(err)
+	tape := cassette.New(rec.cassetteName)
 
-	switch {
-	case rec.mode == ModeRecordOnly:
-		return cassette.New(rec.cassetteName), nil
-	case rec.mode == ModeReplayOnly && !cassetteExists:
-		return nil, fmt.Errorf("%w: %s", cassette.ErrCassetteNotFound, cassetteFile)
-	case rec.mode == ModeReplayOnly && cassetteExists:
-		return cassette.Load(rec.cassetteName)
-	case rec.mode == ModeReplayWithNewEpisodes && !cassetteExists:
-		return cassette.New(rec.cassetteName), nil
-	case rec.mode == ModeReplayWithNewEpisodes && cassetteExists:
-		return cassette.Load(rec.cassetteName)
-	case rec.mode == ModeRecordOnce && !cassetteExists:
-		return cassette.New(rec.cassetteName), nil
-	case rec.mode == ModeRecordOnce && cassetteExists:
-		return cassette.Load(rec.cassetteName)
-	case rec.mode == ModePassthrough:
-		return cassette.New(rec.cassetteName), nil
+	// Configure the cassette based on the recorder configuration
+	tape.ReplayableInteractions = rec.replayableInteractions
+	tape.Matcher = rec.matcher
+	tape.Hasher = rec.hasher
+	tape.CompressionEnabled = rec.withCompression
+
+	_, statErr := os.Stat(tape.File())
+	if statErr != nil && !os.IsNotExist(statErr) {
+		// Another kind of error occurred (e.g., permissions)
+		return nil, fmt.Errorf("failed to access cassette file %s: %w", tape.File(), statErr)
+	}
+	cassetteExists := statErr == nil
+
+	loadTape := func() error {
+		if err := tape.Load(); err != nil {
+			return fmt.Errorf("failed to load cassette %s: %w", tape.File(), err)
+		}
+		return nil
+	}
+
+	switch rec.mode {
+	case ModeRecordOnly, ModePassthrough:
+		// Always create a new cassette file.
+
+	case ModeRecordOnce, ModeReplayWithNewEpisodes:
+		if cassetteExists {
+			if err := loadTape(); err != nil {
+				return nil, err
+			}
+		}
+
+	case ModeReplayOnly:
+		if !cassetteExists {
+			return nil, fmt.Errorf("%w: %s", cassette.ErrCassetteNotFound, tape.File())
+		}
+		if err := loadTape(); err != nil {
+			return nil, err
+		}
+
 	default:
 		return nil, ErrInvalidMode
 	}
+
+	return tape, nil
 }
 
 // getRoundTripper returns the [http.RoundTripper] used by the recorder.
@@ -452,9 +501,9 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 		if err != nil {
 			return nil, err
 		}
+		defer resp.Body.Close()
 	}
 	requestDuration := time.Since(start)
-	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -510,7 +559,7 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 // interactions if running in one of the recording modes. When
 // running in ModePassthrough no cassette will be saved on disk.
 func (rec *Recorder) Stop() error {
-	cassetteFile := rec.cassette.File
+	cassetteFile := rec.cassette.File()
 	_, err := os.Stat(cassetteFile)
 	cassetteExists := !os.IsNotExist(err)
 
@@ -537,7 +586,7 @@ func (rec *Recorder) Stop() error {
 	return nil
 }
 
-// persisteCassette persists the cassette on disk for future re-use
+// persistCassette persists the cassette on disk for future re-use
 func (rec *Recorder) persistCassette() error {
 	// Apply any before-save hooks
 	for _, interaction := range rec.cassette.Interactions {
