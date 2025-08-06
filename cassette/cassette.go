@@ -25,15 +25,17 @@
 package cassette
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -143,29 +145,31 @@ func (i *Interaction) WasReplayed() bool {
 // GetHTTPRequest converts the recorded interaction request to http.Request
 // instance.
 func (i *Interaction) GetHTTPRequest() (*http.Request, error) {
-	url, err := url.Parse(i.Request.URL)
+	return toHTTPRequest(i.Request)
+}
+
+func toHTTPRequest(req Request) (*http.Request, error) {
+	url, err := url.Parse(req.URL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse request URL %s: %w", req.URL, err)
 	}
 
-	req := &http.Request{
-		Proto:            i.Request.Proto,
-		ProtoMajor:       i.Request.ProtoMajor,
-		ProtoMinor:       i.Request.ProtoMinor,
-		ContentLength:    i.Request.ContentLength,
-		TransferEncoding: i.Request.TransferEncoding,
-		Trailer:          i.Request.Trailer,
-		Host:             i.Request.Host,
-		RemoteAddr:       i.Request.RemoteAddr,
-		RequestURI:       i.Request.RequestURI,
-		Body:             io.NopCloser(strings.NewReader(i.Request.Body)),
-		Form:             i.Request.Form,
-		Header:           i.Request.Headers,
+	return &http.Request{
+		Proto:            req.Proto,
+		ProtoMajor:       req.ProtoMajor,
+		ProtoMinor:       req.ProtoMinor,
+		ContentLength:    req.ContentLength,
+		TransferEncoding: req.TransferEncoding,
+		Trailer:          req.Trailer,
+		Host:             req.Host,
+		RemoteAddr:       req.RemoteAddr,
+		RequestURI:       req.RequestURI,
+		Body:             io.NopCloser(strings.NewReader(req.Body)),
+		Form:             req.Form,
+		Header:           req.Headers,
 		URL:              url,
-		Method:           i.Request.Method,
-	}
-
-	return req, nil
+		Method:           req.Method,
+	}, nil
 }
 
 // GetHTTPResponse converts the recorded interaction response to http.Response
@@ -196,8 +200,13 @@ func (i *Interaction) GetHTTPResponse() (*http.Response, error) {
 }
 
 // MatcherFunc is a predicate, which returns true when the actual request
-// matches an interaction from the cassette.
+// matches an interaction from the cassette. It is used for matching if a
+// HasherFunc is not provided.
 type MatcherFunc func(*http.Request, Request) bool
+
+// HasherFunc generates a hash from an HTTP request for fast matching.
+// The hash should be deterministic and identical for equivalent requests.
+type HasherFunc func(r *http.Request) (string, error)
 
 // defaultMatcher is the default matcher used to match HTTP requests with
 // recorded interactions.
@@ -246,126 +255,49 @@ func NewDefaultMatcher(opts ...DefaultMatcherOption) MatcherFunc {
 	return m.matcher
 }
 
-// Similar to reflect.DeepEqual, but considers the contents of collections, so
-// {} and nil would be considered equal. works with Array, Map, Slice, or
-// pointer to Array.
-func (m *defaultMatcher) deepEqualContents(x, y any) bool {
-	if reflect.ValueOf(x).IsNil() {
-		if reflect.ValueOf(y).IsNil() {
-			return true
-		} else {
-			return reflect.ValueOf(y).Len() == 0
-		}
-	} else {
-		if reflect.ValueOf(y).IsNil() {
-			return reflect.ValueOf(x).Len() == 0
-		} else {
-			return reflect.DeepEqual(x, y)
-		}
+// NewDefaultHasher returns the default hasher.
+func NewDefaultHasher(opts ...DefaultMatcherOption) HasherFunc {
+	m := &defaultMatcher{}
+	for _, opt := range opts {
+		opt(m)
 	}
+	return m.hasher
 }
 
-// bodyMatches is a predicate which tests whether the bodies of the given HTTP
-// request and interaction request match.
-func (m *defaultMatcher) bodyMatches(r *http.Request, i Request) bool {
-	if r.Body != nil {
-		var buffer bytes.Buffer
-		if _, err := buffer.ReadFrom(r.Body); err != nil {
-			return false
-		}
-
-		r.Body = io.NopCloser(bytes.NewBuffer(buffer.Bytes()))
-		if buffer.String() != i.Body {
-			return false
-		}
-	} else {
-		if len(i.Body) != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// matcher is a predicate which matches the provided HTTP request again a
-// recorded interaction request.
+// matcher is a predicate which matches the provided HTTP request against a
+// recorded interaction request by comparing their hashes.
 func (m *defaultMatcher) matcher(r *http.Request, i Request) bool {
-	if r.Method != i.Method {
+	hasher := defaultInteractionRequestHasher
+
+	reqHash, err := hasher(r, m.ignoreHeaders)
+	if err != nil {
 		return false
 	}
 
-	if r.URL.String() != i.URL {
+	interactionReq, err := toHTTPRequest(i)
+	if err != nil {
 		return false
 	}
 
-	if r.Proto != i.Proto {
+	recHash, err := hasher(interactionReq, m.ignoreHeaders)
+	if err != nil {
 		return false
 	}
 
-	if r.ProtoMajor != i.ProtoMajor {
-		return false
-	}
+	return reqHash == recHash
+}
 
-	if r.ProtoMinor != i.ProtoMinor {
-		return false
-	}
-
-	requestHeader := r.Header.Clone()
-	cassetteRequestHeaders := i.Headers.Clone()
-
-	for _, header := range m.ignoreHeaders {
-		delete(requestHeader, header)
-		delete(cassetteRequestHeaders, header)
-	}
-
-	if !m.deepEqualContents(requestHeader, cassetteRequestHeaders) {
-		return false
-	}
-
-	if !m.bodyMatches(r, i) {
-		return false
-	}
-
-	if r.ContentLength != i.ContentLength {
-		return false
-	}
-
-	if !m.deepEqualContents(r.TransferEncoding, i.TransferEncoding) {
-		return false
-	}
-
-	if r.Host != i.Host {
-		return false
-	}
-
-	// Only ParseForm for non-GET requests since that would use query params
-	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-		err := r.ParseForm()
-		if err != nil {
-			return false
-		}
-	}
-	if !m.deepEqualContents(r.Form, i.Form) {
-		return false
-	}
-
-	if !m.deepEqualContents(r.Trailer, i.Trailer) {
-		return false
-	}
-
-	if r.RemoteAddr != i.RemoteAddr {
-		return false
-	}
-
-	if r.RequestURI != i.RequestURI {
-		return false
-	}
-
-	return true
+// hasher generates a hash from an HTTP request using the default hashing logic.
+func (m *defaultMatcher) hasher(r *http.Request) (string, error) {
+	return defaultInteractionRequestHasher(r, m.ignoreHeaders)
 }
 
 // DefaultMatcher is the default matcher used to match HTTP requests with
-// recorded interactions
+// recorded interactions.
 var DefaultMatcher = NewDefaultMatcher()
+
+// DefaultHasher is the default hasher used to generate hashes for matching.
+var DefaultHasher = NewDefaultHasher()
 
 // Cassette represents a cassette containing recorded interactions.
 type Cassette struct {
@@ -373,9 +305,6 @@ type Cassette struct {
 
 	// Name of the cassette
 	Name string `yaml:"-"`
-
-	// File name of the cassette as written on disk
-	File string `yaml:"-"`
 
 	// Cassette format version
 	Version int `yaml:"version"`
@@ -387,61 +316,170 @@ type Cassette struct {
 	// interactions to be replayed or not
 	ReplayableInteractions bool `yaml:"-"`
 
-	// Matches actual request with interaction requests.
+	// CompressionEnabled defines whether to compress the cassette
+	CompressionEnabled bool `yaml:"compression_enabled,omitempty"`
+
+	// Matcher matches an actual request with an interaction.
+	// It is only used if Hasher is nil.
 	Matcher MatcherFunc `yaml:"-"`
+
+	// Hasher generates a hash from a request for fast matching.
+	// If set, this takes precedence over Matcher.
+	Hasher HasherFunc `yaml:"-"`
 
 	// IsNew specifies whether this is a newly created cassette.
 	// Returns false, when the cassette was loaded from an
 	// existing source, e.g. a file.
 	IsNew bool `yaml:"-"`
 
-	nextInteractionId int `yaml:"-"`
+	nextInteractionId int              `yaml:"-"`
+	hashIndex         map[string][]int `yaml:"-"`
 }
 
 // New creates a new empty cassette
 func New(name string) *Cassette {
 	c := &Cassette{
 		Name:                   name,
-		File:                   fmt.Sprintf("%s.yaml", name),
 		Version:                CassetteFormatVersion,
 		Interactions:           make([]*Interaction, 0),
 		Matcher:                DefaultMatcher,
+		Hasher:                 DefaultHasher,
 		ReplayableInteractions: false,
+		CompressionEnabled:     false,
 		IsNew:                  true,
 		nextInteractionId:      0,
+		hashIndex:              make(map[string][]int),
 	}
 
 	return c
 }
 
-// Load reads a cassette file from disk
-func Load(name string) (*Cassette, error) {
-	c := New(name)
-	data, err := os.ReadFile(c.File)
+// File returns the cassette file name as written on disk.
+func (c *Cassette) File() string {
+	if c == nil {
+		return ""
+	}
+
+	file := fmt.Sprintf("%s.yaml", c.Name)
+
+	if c.CompressionEnabled {
+		return file + ".gz"
+	}
+
+	return file
+}
+
+func (c *Cassette) Load() error {
+	if c == nil {
+		return fmt.Errorf("cassette is nil")
+	}
+
+	file := c.File()
+
+	f, err := os.Open(file)
 	if err != nil {
-		return nil, err
+		// Return the original os.ReadFile error format for consistency.
+		if os.IsNotExist(err) {
+			return err
+		}
+		return fmt.Errorf("failed to read cassette file %s: %w", file, err)
+	}
+	defer f.Close()
+
+	var reader io.Reader = f
+	if c.CompressionEnabled {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader for %s: %w", file, err)
+		}
+		defer gz.Close()
+		reader = gz
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read cassette data from %s: %w", file, err)
 	}
 
 	c.IsNew = false
 	if err := yaml.Unmarshal(data, c); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to unmarshal cassette file %s: %w", file, err)
 	}
 
 	if c.Version != CassetteFormatVersion {
-		return nil, fmt.Errorf("%w: %d", ErrUnsupportedCassetteFormat, CassetteFormatVersion)
+		return fmt.Errorf("%w: found version %d, but reader supports version %d", ErrUnsupportedCassetteFormat, c.Version, CassetteFormatVersion)
 	}
+
 	c.nextInteractionId = len(c.Interactions)
 
-	return c, err
+	if err := c.buildHashIndex(); err != nil {
+		return fmt.Errorf("failed to build hash index for cassette %s: %w", c.Name, err)
+	}
+
+	return nil
+}
+
+// Load is a convenience function which loads a cassette from disk and returns
+// it.
+func Load(name string) (*Cassette, error) {
+	c := New(name)
+
+	if err := c.Load(); err != nil {
+		return nil, fmt.Errorf("failed to load cassette %s: %w", name, err)
+	}
+
+	return c, nil
+}
+
+func (c *Cassette) buildHashIndex() error {
+	if c.Hasher == nil {
+		return nil
+	}
+
+	for i, interaction := range c.Interactions {
+		req, err := interaction.GetHTTPRequest()
+		if err != nil {
+			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", interaction.ID, err)
+		}
+
+		hash, err := c.Hasher(req)
+		if err != nil {
+			return fmt.Errorf("failed to hash request for interaction %d: %w", interaction.ID, err)
+		}
+
+		if _, exists := c.hashIndex[hash]; !exists {
+			c.hashIndex[hash] = make([]int, 0)
+		}
+
+		c.hashIndex[hash] = append(c.hashIndex[hash], i)
+	}
+
+	return nil
 }
 
 // AddInteraction appends a new interaction to the cassette
-func (c *Cassette) AddInteraction(i *Interaction) {
+func (c *Cassette) AddInteraction(i *Interaction) error {
 	c.Lock()
 	defer c.Unlock()
 	i.ID = c.nextInteractionId
 	c.nextInteractionId += 1
+
+	if c.Hasher != nil {
+		req, err := i.GetHTTPRequest()
+		if err != nil {
+			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", i.ID, err)
+		}
+
+		hash, err := c.Hasher(req)
+		if err != nil {
+			return fmt.Errorf("failed to hash request for interaction %d: %w", i.ID, err)
+		}
+
+		c.hashIndex[hash] = append(c.hashIndex[hash], i.ID)
+	}
+
 	c.Interactions = append(c.Interactions, i)
+	return nil
 }
 
 // GetInteraction retrieves a recorded request/response interaction
@@ -450,19 +488,112 @@ func (c *Cassette) GetInteraction(r *http.Request) (*Interaction, error) {
 }
 
 // getInteraction searches for the interaction corresponding to the given HTTP
-// request, by using the configured [MatcherFunc].
+// request, using either hash-based or matcher-based lookup.
 func (c *Cassette) getInteraction(r *http.Request) (*Interaction, error) {
 	c.Lock()
 	defer c.Unlock()
 	if r.Body == nil {
-		// causes an error in the matcher when we try to do r.ParseForm if r.Body is nil
-		// r.ParseForm returns missing form body error
 		r.Body = http.NoBody
 	}
-	for _, i := range c.Interactions {
-		if (c.ReplayableInteractions || !i.replayed) && c.Matcher(r, i.Request) {
-			i.replayed = true
-			return i, nil
+
+	var interaction *Interaction
+	var err error
+
+	if c.Hasher != nil {
+		interaction, err = c.getInteractionByHash(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interaction by hash: %w", err)
+		}
+	} else {
+		interaction, err = c.getInteractionByMatcher(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interaction by matcher: %w", err)
+		}
+	}
+
+	return c.overrideRecordedRequestBody(r, interaction)
+}
+
+func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
+	if c.Hasher == nil {
+		return nil, fmt.Errorf("cassette has no hasher defined")
+	}
+
+	reqHash, err := c.Hasher(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash request: %w", err)
+	}
+
+	interactions, ok := c.hashIndex[reqHash]
+	if !ok {
+		return nil, ErrInteractionNotFound
+	}
+
+	var interaction *Interaction
+	for _, id := range interactions {
+		interaction = c.Interactions[id]
+		if !c.ReplayableInteractions && interaction.replayed {
+			continue
+		}
+
+		interaction.replayed = true
+		return interaction, nil
+	}
+
+	return nil, ErrInteractionNotFound
+}
+
+// overrideRecordedRequestBody reads the request body from the HTTP request and
+// overrides the recorded request body in the interaction with the actual
+// request.  This is useful when the request body contains dynamic data that
+// needs to be re-used in the response, such as JSON-RPC id fields.
+func (c *Cassette) overrideRecordedRequestBody(r *http.Request, originalInteraction *Interaction) (*Interaction, error) {
+	buf, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+
+	r.Body.Close()
+	r.Body = io.NopCloser(strings.NewReader(string(buf)))
+
+	reqBytes, err := httputil.DumpRequestOut(r, true)
+	if err != nil {
+		return nil, err
+	}
+
+	reqBuffer := bytes.NewBuffer(reqBytes)
+	copiedReq, err := http.ReadRequest(bufio.NewReader(reqBuffer))
+	if err != nil {
+		return nil, err
+	}
+
+	err = copiedReq.ParseForm()
+	if err != nil {
+		return nil, err
+	}
+
+	interaction := *originalInteraction
+	interaction.Request = originalInteraction.Request
+
+	interaction.Request.Body = string(buf)
+	interaction.Request.Form = copiedReq.PostForm
+
+	return &interaction, nil
+}
+
+func (c *Cassette) getInteractionByMatcher(r *http.Request) (*Interaction, error) {
+	if c.Matcher == nil {
+		return nil, fmt.Errorf("cassette has no matcher defined")
+	}
+
+	for _, interaction := range c.Interactions {
+		if !c.ReplayableInteractions && interaction.replayed {
+			continue
+		}
+
+		if c.Matcher(r, interaction.Request) {
+			interaction.replayed = true
+			return interaction, nil
 		}
 	}
 
@@ -474,8 +605,10 @@ func (c *Cassette) Save() error {
 	c.Lock()
 	defer c.Unlock()
 
+	file := c.File()
+
 	// Create directory for cassette if missing
-	cassetteDir := filepath.Dir(c.File)
+	cassetteDir := filepath.Dir(file)
 	if _, err := os.Stat(cassetteDir); os.IsNotExist(err) {
 		if err = os.MkdirAll(cassetteDir, 0o755); err != nil {
 			return err
@@ -502,21 +635,27 @@ func (c *Cassette) Save() error {
 		return err
 	}
 
-	f, err := os.Create(c.File)
+	// underlying file
+	f, err := os.Create(file)
 	if err != nil {
 		return err
 	}
-
 	defer f.Close()
+
+	var w io.WriteCloser = f
+	if c.CompressionEnabled {
+		w = gzip.NewWriter(f)
+		defer w.Close()
+	}
 
 	// Honor the YAML structure specification
 	// http://www.yaml.org/spec/1.2/spec.html#id2760395
-	_, err = f.Write([]byte("---\n"))
+	_, err = w.Write([]byte("---\n"))
 	if err != nil {
 		return err
 	}
 
-	_, err = f.Write(data)
+	_, err = w.Write(data)
 	if err != nil {
 		return err
 	}

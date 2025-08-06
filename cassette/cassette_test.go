@@ -34,6 +34,7 @@ import (
 )
 
 func getMatcherRequests(t *testing.T) (*http.Request, Request) {
+	t.Helper()
 	method := "POST"
 	host := "example.com"
 	path := "/"
@@ -98,6 +99,17 @@ func getMatcherRequests(t *testing.T) (*http.Request, Request) {
 	}
 
 	return r, i
+}
+
+// getHasherRequests creates two equivalent but separate http.Request objects for testing hasher determinism.
+func getHasherRequests(t *testing.T) (*http.Request, *http.Request) {
+	t.Helper()
+	// Re-use the existing helper, but just take the http.Request part.
+	// This is efficient and ensures we get two separate but identical objects.
+	r1, _ := getMatcherRequests(t)
+	r2, _ := getMatcherRequests(t)
+
+	return r1, r2
 }
 
 func TestMatcher(t *testing.T) {
@@ -194,14 +206,6 @@ func TestMatcher(t *testing.T) {
 			}
 		})
 
-		t.Run("not match Form", func(t *testing.T) {
-			r, i := getMatcherRequests(t)
-			r.Form = url.Values{"not": {"a", "match"}}
-			if b := matcherFn(r, i); b {
-				t.Fatalf("request should not have matched")
-			}
-		})
-
 		t.Run("not match Headers", func(t *testing.T) {
 			r, i := getMatcherRequests(t)
 			r.Header = http.Header{"not": {"a", "match"}}
@@ -289,6 +293,121 @@ func TestMatcher(t *testing.T) {
 
 			if b := matcherFn(r, i); !b {
 				t.Fatalf("request should have matched")
+			}
+		})
+	})
+}
+
+func TestHasher(t *testing.T) {
+	t.Run("nil options", func(t *testing.T) {
+		hasherFn := NewDefaultHasher()
+
+		t.Run("match", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+
+			hash1, err := hasherFn(r1)
+			if err != nil {
+				t.Fatalf("hasher failed for r1: %v", err)
+			}
+
+			hash2, err := hasherFn(r2)
+			if err != nil {
+				t.Fatalf("hasher failed for r2: %v", err)
+			}
+
+			if hash1 != hash2 {
+				t.Errorf("expected hashes to be identical for equivalent requests, but got %q and %q", hash1, hash2)
+			}
+			if hash1 == "" {
+				t.Error("expected hash to not be empty")
+			}
+		})
+
+		t.Run("not match on method", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+			r2.Method = "DELETE" // Change one request
+
+			hash1, err := hasherFn(r1)
+			if err != nil {
+				t.Fatalf("hasher failed for r1: %v", err)
+			}
+			hash2, err := hasherFn(r2)
+			if err != nil {
+				t.Fatalf("hasher failed for r2: %v", err)
+			}
+
+			if hash1 == hash2 {
+				t.Error("expected hashes to be different when method differs, but they were identical")
+			}
+		})
+	})
+
+	t.Run("WithIgnoreHeaders", func(t *testing.T) {
+		hasherFn := NewDefaultHasher(WithIgnoreHeaders("X-Custom-Header", "User-Agent"))
+
+		t.Run("ignores specified headers", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+
+			// Add the headers to be ignored with different values
+			r1.Header.Set("X-Custom-Header", "value-1")
+			r1.Header.Set("User-Agent", "agent-1")
+			r2.Header.Set("X-Custom-Header", "value-2")
+			r2.Header.Set("User-Agent", "agent-2")
+
+			hash1, _ := hasherFn(r1)
+			hash2, _ := hasherFn(r2)
+
+			if hash1 != hash2 {
+				t.Error("expected hashes to be identical when ignored headers differ")
+			}
+		})
+
+		t.Run("still considers other headers", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+
+			// Add a non-ignored header with different values
+			r1.Header.Set("X-Important-Header", "value-1")
+			r2.Header.Set("X-Important-Header", "value-2")
+
+			hash1, _ := hasherFn(r1)
+			hash2, _ := hasherFn(r2)
+
+			if hash1 == hash2 {
+				t.Error("expected hashes to be different when a non-ignored header differs")
+			}
+		})
+	})
+
+	t.Run("WithIgnoreUserAgent", func(t *testing.T) {
+		hasherFn := NewDefaultHasher(WithIgnoreUserAgent())
+
+		t.Run("ignores user agent", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+			r1.Header.Set("User-Agent", "agent-1")
+			r2.Header.Set("User-Agent", "agent-2")
+
+			hash1, _ := hasherFn(r1)
+			hash2, _ := hasherFn(r2)
+
+			if hash1 != hash2 {
+				t.Error("expected hashes to be identical when User-Agent differs")
+			}
+		})
+	})
+
+	t.Run("WithIgnoreAuthorization", func(t *testing.T) {
+		hasherFn := NewDefaultHasher(WithIgnoreAuthorization())
+
+		t.Run("ignores authorization", func(t *testing.T) {
+			r1, r2 := getHasherRequests(t)
+			r1.Header.Set("Authorization", "Bearer token1")
+			r2.Header.Set("Authorization", "Bearer token2")
+
+			hash1, _ := hasherFn(r1)
+			hash2, _ := hasherFn(r2)
+
+			if hash1 != hash2 {
+				t.Error("expected hashes to be identical when Authorization differs")
 			}
 		})
 	})

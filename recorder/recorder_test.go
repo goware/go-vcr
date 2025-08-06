@@ -420,7 +420,7 @@ func TestRecordOnceWithMissingEpisodes(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected err but was %T %s", err, err)
 		}
-		if urlErr.Err != cassette.ErrInteractionNotFound {
+		if !errors.Is(urlErr.Err, cassette.ErrInteractionNotFound) {
 			t.Fatalf("expected cassette.ErrInteractionNotFound but was %T %s", err, err)
 		}
 	}
@@ -587,7 +587,7 @@ func TestPassthroughMode(t *testing.T) {
 	// The file should not exists, since we haven't been recording
 	rec.Stop()
 
-	if _, err := cassette.Load(cassPath); !os.IsNotExist(err) {
+	if _, err := cassette.Load(cassPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 }
@@ -1187,7 +1187,7 @@ func TestInvalidRecorderMode(t *testing.T) {
 		recorder.WithMode(recorder.Mode(-42)),
 	}
 	_, err := recorder.New("invalid_recorder_mode", opts...)
-	if err != recorder.ErrInvalidMode {
+	if !errors.Is(err, recorder.ErrInvalidMode) {
 		t.Fatal("expected recorder to fail with invalid mode")
 	}
 }
