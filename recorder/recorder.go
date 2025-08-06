@@ -430,7 +430,7 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 		if err == nil {
 			// Interaction found, return it
 			return interaction, nil
-		} else if err == cassette.ErrInteractionNotFound {
+		} else if errors.Is(err, cassette.ErrInteractionNotFound) {
 			// Interaction not found, we have a new episode
 			break
 		} else {
@@ -451,7 +451,7 @@ func (rec *Recorder) requestHandler(r *http.Request, serverResponse *http.Respon
 		if err == nil {
 			// Interaction found, return it
 			return interaction, nil
-		} else if err == cassette.ErrInteractionNotFound {
+		} else if errors.Is(err, cassette.ErrInteractionNotFound) {
 			// Interaction not found, we have to record it
 			break
 		} else {

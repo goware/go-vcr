@@ -469,10 +469,12 @@ func (c *Cassette) AddInteraction(i *Interaction) error {
 		if err != nil {
 			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", i.ID, err)
 		}
+
 		hash, err := c.Hasher(req)
 		if err != nil {
 			return fmt.Errorf("failed to hash request for interaction %d: %w", i.ID, err)
 		}
+
 		c.hashIndex[hash] = append(c.hashIndex[hash], i.ID)
 	}
 
