@@ -31,7 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -459,7 +458,7 @@ func (c *Cassette) buildHashIndex() error {
 }
 
 // AddInteraction appends a new interaction to the cassette
-func (c *Cassette) AddInteraction(i *Interaction) {
+func (c *Cassette) AddInteraction(i *Interaction) error {
 	c.Lock()
 	defer c.Unlock()
 	i.ID = c.nextInteractionId
@@ -468,24 +467,17 @@ func (c *Cassette) AddInteraction(i *Interaction) {
 	if c.Hasher != nil {
 		req, err := i.GetHTTPRequest()
 		if err != nil {
-			slog.Error("failed to get HTTP request for interaction",
-				"error", err,
-				"interaction_id", i.ID,
-			)
-			return
+			return fmt.Errorf("failed to get HTTP request for interaction %d: %w", i.ID, err)
 		}
 		hash, err := c.Hasher(req)
 		if err != nil {
-			slog.Error("failed to hash interaction request",
-				"error", err,
-				"interaction_id", i.ID,
-			)
-			return
+			return fmt.Errorf("failed to hash request for interaction %d: %w", i.ID, err)
 		}
 		c.hashIndex[hash] = append(c.hashIndex[hash], i.ID)
 	}
 
 	c.Interactions = append(c.Interactions, i)
+	return nil
 }
 
 // GetInteraction retrieves a recorded request/response interaction
@@ -502,13 +494,29 @@ func (c *Cassette) getInteraction(r *http.Request) (*Interaction, error) {
 		r.Body = http.NoBody
 	}
 
+	var interaction *Interaction
+	var err error
+
 	if c.Hasher != nil {
-		return c.getInteractionByHash(r)
+		interaction, err = c.getInteractionByHash(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interaction by hash: %w", err)
+		}
+	} else {
+		interaction, err = c.getInteractionByMatcher(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interaction by matcher: %w", err)
+		}
 	}
-	return c.getInteractionByMatcher(r)
+
+	return c.overrideRecordedRequestBody(r, interaction)
 }
 
 func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
+	if c.Hasher == nil {
+		return nil, fmt.Errorf("cassette has no hasher defined")
+	}
+
 	reqHash, err := c.Hasher(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash request: %w", err)
@@ -527,17 +535,22 @@ func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
 		}
 
 		interaction.replayed = true
-		break
+		return interaction, nil
 	}
 
-	if interaction == nil {
-		return nil, ErrInteractionNotFound
-	}
+	return nil, ErrInteractionNotFound
+}
 
+// overrideRecordedRequestBody reads the request body from the HTTP request and
+// overrides the recorded request body in the interaction with the actual
+// request.  This is useful when the request body contains dynamic data that
+// needs to be re-used in the response, such as JSON-RPC id fields.
+func (c *Cassette) overrideRecordedRequestBody(r *http.Request, originalInteraction *Interaction) (*Interaction, error) {
 	buf, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
+
 	r.Body.Close()
 	r.Body = io.NopCloser(strings.NewReader(string(buf)))
 
@@ -557,51 +570,28 @@ func (c *Cassette) getInteractionByHash(r *http.Request) (*Interaction, error) {
 		return nil, err
 	}
 
+	interaction := *originalInteraction
+	interaction.Request = originalInteraction.Request
+
 	interaction.Request.Body = string(buf)
 	interaction.Request.Form = copiedReq.PostForm
 
-	/*
-		copiedReq, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buf)))
-		if err != nil {
-			return nil, fmt.Errorf("failed to read request: %w", err)
-		}
-
-		err = copiedReq.ParseForm()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse form: %w", err)
-		}
-
-		// update the request in the interaction with the actual request
-		interaction.Request = Request{
-			Proto:            r.Proto,
-			ProtoMajor:       r.ProtoMajor,
-			ProtoMinor:       r.ProtoMinor,
-			ContentLength:    r.ContentLength,
-			TransferEncoding: r.TransferEncoding,
-			Trailer:          r.Trailer,
-			Host:             r.Host,
-			RemoteAddr:       r.RemoteAddr,
-			RequestURI:       r.RequestURI,
-			Body:             string(buf),
-			Form:             copiedReq.PostForm,
-			Headers:          r.Header,
-			URL:              r.URL.String(),
-			Method:           r.Method,
-		}
-	*/
-
-	return interaction, nil
+	return &interaction, nil
 }
 
 func (c *Cassette) getInteractionByMatcher(r *http.Request) (*Interaction, error) {
-	for _, i := range c.Interactions {
-		if !c.ReplayableInteractions && i.replayed {
+	if c.Matcher == nil {
+		return nil, fmt.Errorf("cassette has no matcher defined")
+	}
+
+	for _, interaction := range c.Interactions {
+		if !c.ReplayableInteractions && interaction.replayed {
 			continue
 		}
 
-		if c.Matcher(r, i.Request) {
-			i.replayed = true
-			return i, nil
+		if c.Matcher(r, interaction.Request) {
+			interaction.replayed = true
+			return interaction, nil
 		}
 	}
 

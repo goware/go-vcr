@@ -5,9 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 )
@@ -73,29 +71,6 @@ func serializeHeaders(h http.Header, ignore []string) string {
 	return b.String()
 }
 
-func serializeURLValues(v url.Values) string {
-	if len(v) == 0 {
-		return ""
-	}
-
-	keys := make([]string, 0, len(v))
-	for k := range v {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var b strings.Builder
-	for i, k := range keys {
-		values := v[k]
-		sort.Strings(values)
-		b.WriteString(fmt.Sprintf("%s=%s", url.QueryEscape(k), url.QueryEscape(strings.Join(values, ","))))
-		if i < len(keys)-1 {
-			b.WriteString("&")
-		}
-	}
-	return b.String()
-}
-
 func serializeTransferEncoding(te []string) string {
 	if len(te) == 0 {
 		return ""
@@ -109,8 +84,6 @@ func serializeTransferEncoding(te []string) string {
 
 // defaultInteractionRequestHasher generates a hash from a live http.Request.
 func defaultInteractionRequestHasher(r *http.Request, ignoreHeaders []string) (string, error) {
-	slog.Info("defaultInteractionRequestHasher called")
-
 	// Read and restore the body so it can be used by subsequent handlers.
 	var bodyBytes []byte
 	if r.Body != nil && r.Body != http.NoBody {
@@ -141,7 +114,6 @@ func defaultInteractionRequestHasher(r *http.Request, ignoreHeaders []string) (s
 	hasher.Add(serializeHeaders(r.Header, ignoreHeaders))
 	hasher.Add(string(bodyBytes))
 	hasher.Add(fmt.Sprintf("%d", r.ContentLength))
-	hasher.Add(serializeURLValues(r.Form))
 	hasher.Add(serializeHeaders(r.Trailer, nil))
 	hasher.Add(serializeTransferEncoding(r.TransferEncoding))
 	hasher.Add(r.RemoteAddr)
