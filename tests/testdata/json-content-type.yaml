@@ -2,6 +2,7 @@
 version: 2
 interactions:
     - id: 0
+      hash: 8806b4fd924abbf3da6f75a7a672c74451da5031a68bc6e01d166c68e3e3c1a5
       request:
         proto: HTTP/1.1
         proto_major: 1

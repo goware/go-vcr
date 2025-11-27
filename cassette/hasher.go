@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -14,30 +16,31 @@ const defaultDelimiter = "::"
 
 // RequestHasher builds a deterministic hash from various request components.
 type RequestHasher struct {
-	builder   strings.Builder
-	delimiter string
+	hash  hash.Hash
+	first bool
 }
 
 func NewRequestHasher() *RequestHasher {
 	return &RequestHasher{
-		delimiter: defaultDelimiter,
+		hash:  sha256.New(),
+		first: true,
 	}
 }
 
 func (h *RequestHasher) Add(part string) {
-	if h.builder.Len() > 0 {
-		h.builder.WriteString(h.delimiter)
+	if !h.first {
+		h.hash.Write([]byte(defaultDelimiter))
 	}
-	h.builder.WriteString(part)
+	h.first = false
+	h.hash.Write([]byte(part))
 }
 
-func (h *RequestHasher) String() string {
-	return h.builder.String()
+func (h *RequestHasher) AddInt(n int) {
+	h.Add(strconv.Itoa(n))
 }
 
 func (h *RequestHasher) Hash() string {
-	hashBytes := sha256.Sum256([]byte(h.builder.String()))
-	return fmt.Sprintf("%x", hashBytes)
+	return fmt.Sprintf("%x", h.hash.Sum(nil))
 }
 
 // serializeHeaders creates a deterministic string representation of http.Header.
@@ -61,7 +64,9 @@ func serializeHeaders(h http.Header, ignore []string) string {
 
 	var b strings.Builder
 	for i, k := range keys {
-		values := h[k]
+		// Copy values to avoid modifying the original header.
+		values := make([]string, len(h[k]))
+		copy(values, h[k])
 		sort.Strings(values)
 		b.WriteString(fmt.Sprintf("%s:%s", k, strings.Join(values, ",")))
 		if i < len(keys)-1 {
@@ -92,7 +97,7 @@ func defaultInteractionRequestHasher(r *http.Request, ignoreHeaders []string) (s
 		if err != nil {
 			return "", err
 		}
-		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	// Parse form for relevant methods. This is safe because the body was restored.
@@ -109,11 +114,11 @@ func defaultInteractionRequestHasher(r *http.Request, ignoreHeaders []string) (s
 	hasher.Add(r.Host)
 	hasher.Add(r.URL.String())
 	hasher.Add(r.Proto)
-	hasher.Add(fmt.Sprintf("%d", r.ProtoMajor))
-	hasher.Add(fmt.Sprintf("%d", r.ProtoMinor))
+	hasher.AddInt(r.ProtoMajor)
+	hasher.AddInt(r.ProtoMinor)
 	hasher.Add(serializeHeaders(r.Header, ignoreHeaders))
 	hasher.Add(string(bodyBytes))
-	hasher.Add(fmt.Sprintf("%d", r.ContentLength))
+	hasher.AddInt(int(r.ContentLength))
 	hasher.Add(serializeHeaders(r.Trailer, nil))
 	hasher.Add(serializeTransferEncoding(r.TransferEncoding))
 	hasher.Add(r.RemoteAddr)

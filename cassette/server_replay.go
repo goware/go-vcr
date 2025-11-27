@@ -76,12 +76,7 @@ func headersEqual(expected, actual http.Header) bool {
 		func(v1, v2 []string) bool {
 			slices.Sort(v1)
 			slices.Sort(v2)
-
-			if !slices.Equal(v1, v2) {
-				return false
-			}
-
-			return true
+			return slices.Equal(v1, v2)
 		},
 	)
 }
